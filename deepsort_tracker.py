@@ -1,74 +1,64 @@
+"""DeepSORT adapter; TensorFlow is loaded only when creating a real encoder."""
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
 from deep_sort.deep_sort.tracker import Tracker as DeepSortTracker
-from deep_sort.tools import generate_detections as gdet
 from deep_sort.deep_sort import nn_matching
 from deep_sort.deep_sort.detection import Detection
-import numpy as np
+
+
+@dataclass
+class Track:
+    track_id: int
+    bbox: np.ndarray
 
 
 class Tracker:
-    tracker = None
-    encoder = None
-    tracks = None
-
-    def __init__(self):
-        max_cosine_distance = 0.4
-        nn_budget = None
-
-        encoder_model_filename = 'mars-small128.pb'
-
-        metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-        self.tracker = DeepSortTracker(metric, max_iou_distance=0.7, max_age=100, n_init=8)
-
-        '''Когда max_iou_distance установлен на более высокое значение (ближе к 1), трекер будет более терпимым
-        к рамкам, которые частично перекрываются, и это может привести к тому, что более широкий диапазон рамок будет 
-        считаться частью одного и того же объекта. Это может привести к объединению нескольких объектов в один.
-
-        Когда max_iou_distance установлен на более низкое значение (ближе к 0), трекер становится более строгим и
-        требовательным к тому, чтобы две рамки имели более высокий уровень перекрытия для того, чтобы они были
-        считаны как один объект. Это может привести к тому, что объекты будут более четко разделены.'''
-
-        self.encoder = gdet.create_box_encoder(encoder_model_filename, batch_size=1)
+    def __init__(self, encoder_model_filename=None, *, encoder=None, n_init=8, max_age=100):
+        if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in (n_init, max_age)):
+            raise ValueError('n_init and max_age must be positive')
+        metric = nn_matching.NearestNeighborDistanceMetric('cosine', 0.4, 100)
+        self.tracker = DeepSortTracker(metric, max_iou_distance=0.7, max_age=max_age, n_init=n_init)
+        if encoder is None:
+            if encoder_model_filename is None or not Path(encoder_model_filename).is_file():
+                raise ValueError('A trusted local encoder graph is required')
+            from deep_sort.tools.generate_detections import create_box_encoder
+            encoder = create_box_encoder(str(encoder_model_filename), batch_size=1)
+        self.encoder = encoder
+        self.tracks = []
+        self.closed = False
 
     def update(self, frame, detections):
-
-        if len(detections) == 0:
-            self.tracker.predict()
-            self.tracker.update([])  
-            self.update_tracks()
-            return
-
-        bboxes = np.asarray([d[:-1] for d in detections])
-        bboxes[:, 2:] = bboxes[:, 2:] - bboxes[:, 0:2]
-        scores = [d[-1] for d in detections]
-
-        features = self.encoder(frame, bboxes)
-
+        if self.closed:
+            raise RuntimeError('Tracker is closed')
         dets = []
-        for bbox_id, bbox in enumerate(bboxes):
-            dets.append(Detection(bbox, scores[bbox_id], features[bbox_id]))
-
+        if len(detections):
+            values = np.asarray(detections, dtype=np.float32)
+            if (values.ndim != 2 or values.shape[1] != 5 or not np.isfinite(values).all()
+                    or (values[:, 2:4] <= values[:, :2]).any()
+                    or (values[:, 4] < 0).any() or (values[:, 4] > 1).any()):
+                raise ValueError('Invalid tracking detections')
+            boxes = values[:, :4].copy()
+            boxes[:, 2:] -= boxes[:, :2]
+            features = np.asarray(self.encoder(frame, boxes), dtype=np.float32)
+            if (features.ndim != 2 or features.shape[0] != len(boxes) or features.shape[1] == 0
+                    or not np.isfinite(features).all()):
+                raise ValueError('Encoder must return finite nonzero feature vectors')
+            norms = np.linalg.norm(features.astype(np.float64), axis=1)
+            if (norms == 0).any():
+                raise ValueError('Encoder must return nonzero feature vectors')
+            features = (features / norms[:, None]).astype(np.float32)
+            dets = [Detection(box, score, feature)
+                    for box, score, feature in zip(boxes, values[:, 4], features)]
         self.tracker.predict()
         self.tracker.update(dets)
-        self.update_tracks()
+        self.tracks = [Track(t.track_id, t.to_tlbr()) for t in self.tracker.tracks
+                       if t.is_confirmed() and t.time_since_update == 0]
 
-    def update_tracks(self):
-        tracks = []
-        for track in self.tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue
-            bbox = track.to_tlbr()
-
-            id = track.track_id
-
-            tracks.append(Track(id, bbox))
-
-        self.tracks = tracks
-
-
-class Track:
-    track_id = None
-    bbox = None
-
-    def __init__(self, id, bbox):
-        self.track_id = id
-        self.bbox = bbox
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            close = getattr(self.encoder, 'close', None)
+            if close is not None:
+                close()
