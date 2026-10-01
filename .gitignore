@@ -12,4 +12,12 @@ env
 .env
 **/__pycache__/ 
 .ipynb_checkpoints
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.pb
+outputs/
+*.log
+.env.*
 
