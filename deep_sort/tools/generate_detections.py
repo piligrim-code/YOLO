@@ -1,4 +1,5 @@
 # vim: expandtab:ts=4:sw=4
+# Local changes, 2026-10-01: graph/session/crop fixes. See THIRD_PARTY.md.
 import os
 import errno
 import argparse

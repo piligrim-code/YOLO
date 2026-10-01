@@ -18,7 +18,7 @@ vendored code or claim that the surrounding application has an MIT license.
 The root application had no license file; its distribution terms still need
 an explicit owner review together with all dependency/model terms.
 
-This correction additionally modifies `tools/generate_detections.py`: lazy
+The correction dated 2026-10-01 modifies `tools/generate_detections.py`: lazy
 TensorFlow import, isolated and correctly named graph tensors, deterministic
 invalid-crop failures, boundary-inclusive crops, batch validation and explicit
 session closure. The old `freeze_model.py` remains historical TensorFlow 1
